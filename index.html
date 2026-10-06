@@ -482,6 +482,11 @@ button{font:inherit;color:inherit}
 </section>
 
 <!-- ============ music (self-hosted page only) ============ -->
+<audio id="bgAudio" loop preload="auto">
+  <source src="Daniel%20Caesar%20-%20Always%20Official%20Audio.mp3" type="audio/mpeg">
+  <source src="always.mp3" type="audio/mpeg">
+  <source src="music.mp3" type="audio/mpeg">
+</audio>
 <div class="music" id="music" hidden>
   <button type="button" class="music__btn" id="musicBtn" aria-pressed="false" aria-label="Music: Always by Daniel Caesar"><span class="eq" id="musicEq" aria-hidden="true"><i></i><i></i><i></i></span></button>
   <span class="music__tip" id="musicTip" hidden>Tap for music</span>
@@ -801,77 +806,110 @@ renderPhotos(); renderWords(); renderVideo();
 const BG = {id: 'pKFd12id5oQ', name: 'Always', by: 'Daniel Caesar', spotify: 'https://open.spotify.com/track/2LlOeW5rVcvl3QcPNPcDus'};
 const tape = $('#tape'), npText = $('#npText'), npEq = $('#npEq');
 const Music = (() => {
-  const box = $('#music'), btn = $('#musicBtn'), tipEl = $('#musicTip'), eq = $('#musicEq'), page = $('#videoPage');
-  let dead = !EMBED, api = false, bg = null, ready = false, state = -1, want = false, started = false, nudgeT = 0, miniT = 0;
-  let pg = null, pgReady = false, pgId = '', resume = false;
+  const box = $('#music'), btn = $('#musicBtn'), tipEl = $('#musicTip'), eq = $('#musicEq'), page = $('#videoPage'), audio = $('#bgAudio');
   const miniText = $('#musicMini p'), PLAY_TEXT = miniText.textContent, AD_TEXT = 'YouTube is playing an ad first. Your song starts right after. You can skip it here.';
-  let lastT = -1, ad = false, adHits = 0;
+  /* where the song comes from: 'file' = the audio file sitting next to this page (instant, no ads);
+     'yt' = YouTube's player, used only when there is no file; 'none' = neither works here, so just a link */
+  let mode = 'file', state = -1, want = false, started = false, nudgeT = 0, miniT = 0;
+  let api = false, apiAsked = false, apiFailed = false, bg = null, ready = false, lastT = -1, ad = false, adHits = 0;
+  let pg = null, pgReady = false, pgId = '', resume = false;
   function ui(){
     const on = state === 1;
     tape.classList.toggle('is-playing', on); eq.classList.toggle('is-on', on); npEq.classList.toggle('is-on', on);
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-    if (!dead) npText.textContent = (on ? 'Now playing · ' : state === 2 ? 'Paused · ' : '') + `${BG.name} · ${BG.by}`;
+    if (mode !== 'none') npText.textContent = (on ? 'Now playing · ' : state === 2 ? 'Paused · ' : '') + `${BG.name} · ${BG.by}`;
   }
-  function linkOut(){   /* no player available: the song is a link instead */
+  function nudge(){ box.classList.add('is-nudge'); tipEl.hidden = false; }
+  function unNudge(){ box.classList.remove('is-nudge'); tipEl.hidden = true; }
+  function giveUp(){            /* no file and no player: the song becomes a link (only ever seen in previews) */
+    mode = 'none'; box.hidden = true; clearTimeout(nudgeT); state = -1; ui();
     npText.textContent = ''; const a = document.createElement('a'); a.href = BG.spotify; a.target = '_blank'; a.rel = 'noopener'; a.textContent = `${BG.name} · ${BG.by} ↗`; npText.appendChild(a);
+    const n = $('#previewNote'); n.hidden = false;
+    n.textContent = SAVE ? 'الملف مفتوح من الجهاز ومفيش ملف أغنية جنبه، فمفيش صوت. على اللينك المرفوع الأغنية والفيديو بيشتغلوا.' : 'دي معاينة من غير صوت. الأغنية والفيديو بيشتغلوا في النسخة المرفوعة على استضافة بس.';
   }
-  function fail(){ dead = true; box.hidden = true; clearTimeout(nudgeT); state = -1; ui(); linkOut(); }
-  function load(){
-    if (dead){ linkOut(); return; }
-    box.hidden = false;
-    window.onYouTubeIframeAPIReady = () => { api = true;
-      bg = new YT.Player('ytBg', { width: '100%', height: '100%', videoId: BG.id,
-        playerVars: {playsinline: 1, rel: 0, loop: 1, playlist: BG.id, origin: location.origin},
-        events: { onReady(){ ready = true; setInterval(watchAds, 700); if (dead){ dead = false; box.hidden = false; ui(); } if (want) play(); else { try { bg.playVideo(); } catch (e) {} } }, onStateChange(e){ onBg(e.data); }, onError(){ fail(); } } });
-    };
-    const s = document.createElement('script'); s.src = 'https://www.youtube.com/iframe_api'; s.async = true; s.onerror = fail;
+
+  /* ---- the audio file ---- */
+  const sources = $$('source', audio); let missing = 0;
+  sources.forEach(src => src.addEventListener('error', () => { if (++missing >= sources.length) noFile(); }));
+  audio.addEventListener('loadedmetadata', () => { if (mode === 'file') box.hidden = false; });
+  audio.addEventListener('playing', () => { if (mode !== 'file') return; state = 1; want = true; unNudge(); ui(); });
+  audio.addEventListener('pause', () => { if (mode !== 'file') return; state = 2; ui(); });
+  function filePlay(){
+    const p = audio.play();
+    if (p && p.catch) p.catch(e => { if (mode === 'file' && started && e && e.name === 'NotAllowedError') nudge(); });
+  }
+  function noFile(){            /* nothing to play next to the page: fall back to YouTube where that is possible */
+    if (mode !== 'file') return;
+    if (!EMBED || apiFailed){ giveUp(); return; }
+    mode = 'yt'; box.hidden = false; askApi(); makeBg();
+    setTimeout(() => { if (mode === 'yt' && !ready) giveUp(); }, 15000);
+  }
+
+  /* ---- YouTube: always for the video page, and for the song only as the fallback ---- */
+  function askApi(){
+    if (!EMBED || apiAsked) return; apiAsked = true;
+    window.onYouTubeIframeAPIReady = () => { api = true; makeBg(); };
+    const s = document.createElement('script'); s.src = 'https://www.youtube.com/iframe_api'; s.async = true;
+    s.onerror = () => { apiFailed = true; if (mode === 'yt') giveUp(); };
     document.head.appendChild(s);
-    setTimeout(() => { if (!ready && !dead) fail(); }, 15000);
   }
-  function watchAds(){
-    if (!ready || dead) return;
-    let t = 0; try { t = bg.getCurrentTime() || 0; } catch (e) { return; }
-    const moving = lastT >= 0 && t > lastT + .15; lastT = t;
-    adHits = moving && state === -1 ? adHits + 1 : 0;      /* the clock runs but YouTube has not "started" the song: that is an ad */
-    const now = adHits >= 2;
-    if (now === ad) return; ad = now;
-    if (ad){ clearTimeout(nudgeT); unNudge(); miniText.textContent = AD_TEXT; box.classList.add('is-open'); }
-    else { miniText.textContent = PLAY_TEXT; if (state === 1) box.classList.remove('is-open'); }
+  function makeBg(){
+    if (mode !== 'yt' || !api || bg) return;
+    bg = new YT.Player('ytBg', { width: '100%', height: '100%', videoId: BG.id,
+      playerVars: {playsinline: 1, rel: 0, loop: 1, playlist: BG.id, origin: location.origin},
+      events: { onReady(){ ready = true; setInterval(watchAds, 700); if (mode === 'none'){ mode = 'yt'; box.hidden = false; $('#previewNote').hidden = true; ui(); } if (want) play(); else { try { bg.playVideo(); } catch (e) {} } },
+                onStateChange(e){ onBg(e.data); }, onError(){ giveUp(); } } });
   }
-  function play(){
-    want = true; if (!ready) return;
-    bg.playVideo(); clearTimeout(nudgeT);
-    nudgeT = setTimeout(() => { if (want && state !== 1 && !ad) nudge(); }, 4500);
-  }
-  function pause(){ want = false; clearTimeout(nudgeT); unNudge(); if (ready) bg.pauseVideo(); }
   function onBg(s){
+    if (mode !== 'yt') return;
     state = s;
     if (s === 1){ want = true; clearTimeout(nudgeT); unNudge(); box.classList.remove('is-open'); }
     else if (s === 2) want = false;
     else if (s === 0) bg.playVideo();                 /* loop */
     ui();
   }
-  /* phones that will not start sound by themselves: first a hint on the button, then the player itself to tap */
-  function nudge(){ box.classList.add('is-nudge'); tipEl.hidden = false; }
-  function unNudge(){ box.classList.remove('is-nudge'); tipEl.hidden = true; }
-  function start(){ if (dead || started) return; started = true; if (state !== 1) play(); }
+  function watchAds(){          /* the clock runs but YouTube has not "started" the song: that is one of its ads, so show the player and its Skip button */
+    if (mode !== 'yt' || !ready) return;
+    let t = 0; try { t = bg.getCurrentTime() || 0; } catch (e) { return; }
+    const moving = lastT >= 0 && t > lastT + .15; lastT = t;
+    adHits = moving && state === -1 ? adHits + 1 : 0;
+    const now = adHits >= 2;
+    if (now === ad) return; ad = now;
+    if (ad){ clearTimeout(nudgeT); unNudge(); miniText.textContent = AD_TEXT; box.classList.add('is-open'); }
+    else { miniText.textContent = PLAY_TEXT; if (state === 1) box.classList.remove('is-open'); }
+  }
+
+  /* ---- controls shared by both ---- */
+  function play(){
+    want = true;
+    if (mode === 'file'){ filePlay(); return; }
+    if (mode !== 'yt' || !ready) return;
+    bg.playVideo(); clearTimeout(nudgeT);
+    nudgeT = setTimeout(() => { if (want && state !== 1 && !ad) nudge(); }, 4500);
+  }
+  function pause(){
+    want = false; clearTimeout(nudgeT); unNudge();
+    if (mode === 'file') audio.pause(); else if (mode === 'yt' && ready) bg.pauseVideo();
+  }
+  function start(){ if (started || mode === 'none') return; started = true; if (state !== 1) play(); }
   btn.addEventListener('click', () => {
-    if (dead) return; started = true;
+    if (mode === 'none') return; started = true;
     if (state === 1){ pause(); return; }
-    if (ad){ box.classList.toggle('is-open'); return; }          /* during an ad the button just shows or hides the player */
-    play(); clearTimeout(miniT); miniT = setTimeout(() => { if (state !== 1) box.classList.add('is-open'); }, 1700);
+    if (mode === 'yt' && ad){ box.classList.toggle('is-open'); return; }          /* during an ad the button just shows or hides the player */
+    play();
+    if (mode === 'yt'){ clearTimeout(miniT); miniT = setTimeout(() => { if (state !== 1) box.classList.add('is-open'); }, 1700); }
   });
   document.addEventListener('click', e => { if (box.classList.contains('is-open') && !e.target.closest('#music')) box.classList.remove('is-open'); });
 
-  /* the owner's video, on its own page; the tape waits while it plays */
+  /* the owner's video, on its own page; the song waits while it plays */
   function openVideo(){
-    if (dead || !api || !DATA.yt) return false;
+    if (!EMBED || !api || !DATA.yt) return false;
     resume = state === 1 || state === 3 || want; pause();
     page.hidden = false; root.classList.add('is-locked'); box.style.visibility = 'hidden';   /* one player at a time */
     if (!pg){ pgId = DATA.yt;
       pg = new YT.Player('ytPage', { width: '100%', height: '100%', videoId: pgId,
         playerVars: {autoplay: 1, playsinline: 1, rel: 0, origin: location.origin},
-        events: { onReady(e){ pgReady = true; e.target.playVideo(); }, onStateChange(e){ if (e.data === 1 && state === 1) bg.pauseVideo(); } } });
+        events: { onReady(e){ pgReady = true; e.target.playVideo(); }, onStateChange(e){ if (e.data === 1 && state === 1) pause(); } } });
     } else if (pgReady){ if (pgId !== DATA.yt){ pgId = DATA.yt; pg.loadVideoById(pgId); } else pg.playVideo(); }
     return true;
   }
@@ -882,13 +920,15 @@ const Music = (() => {
   }
   $('#videoOpen').addEventListener('click', e => { if (openVideo()) e.preventDefault(); });   /* otherwise the link opens YouTube */
   $('#videoClose').addEventListener('click', closeVideo);
+
+  function load(){
+    askApi();                                           /* the video page needs it either way */
+    audio.load(); filePlay();                           /* starts by itself wherever the browser allows it */
+  }
   return { load, start };
 })();
 Music.load();
 ['click', 'keydown', 'touchend'].forEach(ev => document.addEventListener(ev, () => Music.start(), true));   /* the first tap anywhere lets the browser play sound */
-/* only the sender ever sees these two cases: the silent Claude preview, or the file opened straight from his computer */
-if (!EMBED){ const n = $('#previewNote'); n.hidden = false;
-  n.textContent = SAVE ? 'الملف مفتوح من الجهاز، فمفيش صوت. ارفعه على استضافة والأغنية والفيديو هيشتغلوا.' : 'دي معاينة من غير صوت. الأغنية والفيديو بيشتغلوا في النسخة المرفوعة على استضافة بس.'; }
 
 /* =====================================================================
    1. Passcode
